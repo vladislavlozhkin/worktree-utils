@@ -1,6 +1,6 @@
 # Worktree Configuration
-# Syntax: [VERB] FILENAME
-# Verbs: LINK (default), COPY
+# Syntax: [VERB] FILENAME_OR_COMMAND
+# Verbs: LINK (default), COPY, RUN
 
 # Shared configs (Symlinks)
 LINK .geminiignore
@@ -9,3 +9,5 @@ LINK scripts
 
 # Local configs (Copies)
 # COPY .env
+
+# Execution (Commands)

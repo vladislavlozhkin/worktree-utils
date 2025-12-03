@@ -16,18 +16,20 @@
 2.  **`.worktree-config`**: Файл в корне проекта для явной настройки.
 
 **Синтаксис `.worktree-config`:**
-Поддерживает два режима: `LINK` (ссылка) и `COPY` (копия).
+Поддерживает три режима: `LINK`, `COPY` и `RUN`.
 ```text
 # По умолчанию создается симлинк
 scripts
-CLAUDE.md
 
 # Явное создание симлинка
 LINK .geminiignore
 
-# Копирование файла (полезно для .env, который нужно менять локально)
+# Копирование файла (полезно для .env)
 COPY .env
-COPY .env.local
+
+# Запуск команд (выполняются в context нового worktree)
+RUN npm install
+RUN echo "Environment ready!"
 ```
 
 ### 2. `scripts/wt-new` (Quick Start)

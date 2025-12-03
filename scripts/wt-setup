@@ -93,6 +93,15 @@ for TASK in "${TASKS[@]}"; do
   ACTION="${TASK%%|*}"
   ITEM="${TASK#*|}"
   
+  # === Обработка команд RUN ===
+  if [ "$ACTION" == "RUN" ]; then
+    echo "🚀 RUN: $ITEM"
+    eval "$ITEM"
+    continue
+  fi
+
+  # === Обработка файлов (LINK / COPY) ===
+  
   SOURCE="$MAIN_WORKTREE/$ITEM"
   TARGET="./$ITEM"
 
@@ -134,10 +143,6 @@ for TASK in "${TASKS[@]}"; do
      
      cp -R "$SOURCE" "$TARGET"
      echo "📋 COPY: $ITEM"
-     
-     # TODO: Добавить в локальный .git/info/exclude?
-     # Для COPY это важно, иначе git увидит новый untracked file.
-     # Реализуем это позже или сейчас? Пока оставим как есть.
      
   elif [ "$ACTION" == "LINK" ]; then
      ln -sf "$SOURCE" "$TARGET"
