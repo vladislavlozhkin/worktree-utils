@@ -38,17 +38,17 @@ if [ $RET -ne 0 ]; then
   exit $RET
 fi
 
-# Автоматический запуск ai-link
-# Нам нужно найти скрипт ai-link. Мы знаем, что он лежит в главном worktree.
+# Автоматический запуск wt-setup
+# Нам нужно найти скрипт wt-setup. Мы знаем, что он лежит в главном worktree.
 MAIN_WT=$(git worktree list | head -n 1 | awk '{print $1}')
-AI_LINK_SCRIPT="$MAIN_WT/scripts/ai-link"
+SETUP_SCRIPT="$MAIN_WT/scripts/wt-setup"
 
-if [ -x "$AI_LINK_SCRIPT" ]; then
-  echo "🔗 Запускаем ai-link..."
+if [ -x "$SETUP_SCRIPT" ]; then
+  echo "🔗 Запускаем wt-setup..."
   # Запускаем скрипт ВНУТРИ новой папки
-  (cd "$TARGET_DIR" && "$AI_LINK_SCRIPT")
+  (cd "$TARGET_DIR" && "$SETUP_SCRIPT")
 else
-  echo "⚠️  Скрипт ai-link не найден по пути: $AI_LINK_SCRIPT"
+  echo "⚠️  Скрипт wt-setup не найден по пути: $SETUP_SCRIPT"
   echo "   Вам придется настроить окружение вручную."
 fi
 

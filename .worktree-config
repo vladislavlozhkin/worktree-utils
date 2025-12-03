@@ -1,0 +1,11 @@
+# Worktree Configuration
+# Syntax: [VERB] FILENAME
+# Verbs: LINK (default), COPY
+
+# Shared configs (Symlinks)
+LINK .geminiignore
+LINK CLAUDE.md
+LINK scripts
+
+# Local configs (Copies)
+# COPY .env
