@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# Usage: wt-new <branch-name> [base-branch]
+
+BRANCH_NAME=$1
+BASE_BRANCH=${2:-HEAD}
+
+if [ -z "$BRANCH_NAME" ]; then
+  echo "Использование: wt-new <branch-name> [base-branch]"
+  echo "Пример: wt-new feature/user-auth"
+  exit 1
+fi
+
+# Преобразуем имя ветки в имя папки (заменяем слэши на дефисы)
+# feature/login -> feature-login
+DIR_NAME=${BRANCH_NAME//\//-}
+
+# Путь к новому worktree (создаем на уровень выше текущей папки)
+TARGET_DIR="../$DIR_NAME"
+
+# Проверяем, не занята ли папка
+if [ -d "$TARGET_DIR" ]; then
+   echo "❌ Ошибка: Папка $TARGET_DIR уже существует."
+   exit 1
+fi
+
+echo "🚀 Создаем worktree..."
+echo "   Ветка: $BRANCH_NAME"
+echo "   Папка: $TARGET_DIR"
+echo "   База:  $BASE_BRANCH"
+
+# Создаем worktree
+git worktree add -b "$BRANCH_NAME" "$TARGET_DIR" "$BASE_BRANCH"
+RET=$?
+
+if [ $RET -ne 0 ]; then
+  echo "❌ Ошибка при создании worktree."
+  exit $RET
+fi
+
+# Автоматический запуск ai-link
+# Нам нужно найти скрипт ai-link. Мы знаем, что он лежит в главном worktree.
+MAIN_WT=$(git worktree list | head -n 1 | awk '{print $1}')
+AI_LINK_SCRIPT="$MAIN_WT/scripts/ai-link"
+
+if [ -x "$AI_LINK_SCRIPT" ]; then
+  echo "🔗 Запускаем ai-link..."
+  # Запускаем скрипт ВНУТРИ новой папки
+  (cd "$TARGET_DIR" && "$AI_LINK_SCRIPT")
+else
+  echo "⚠️  Скрипт ai-link не найден по пути: $AI_LINK_SCRIPT"
+  echo "   Вам придется настроить окружение вручную."
+fi
+
+echo ""
+echo "✅ Готово! Для начала работы:"
+echo "cd $TARGET_DIR"

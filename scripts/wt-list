@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# Цвета
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+GRAY='\033[0;90m'
+NC='\033[0m' # No Color
+
+printf "${BLUE}%-40s %-30s %-20s${NC}\n" "PATH" "BRANCH" "LAST COMMIT"
+echo "------------------------------------------------------------------------------------------"
+
+# Читаем список worktree
+git worktree list | while read -r line; do
+    path=$(echo "$line" | awk '{print $1}')
+    commit=$(echo "$line" | awk '{print $2}')
+    branch=$(echo "$line" | awk '{print $3}' | sed 's/\[//;s/\]//')
+    
+    # Получаем относительное время последнего коммита
+    # Используем git log -1 --format="%cr" в контексте того пути
+    # Но git log работает с репозиторием. Для worktree это проще сделать, просто посмотрев на HEAD
+    # Нюанс: чтобы выполнить команду git log для другого worktree, нужно туда зайти или указать gitdir
+    
+    # Простое решение: выводим то, что есть, немного форматируя.
+    # Для красоты сократим домашнюю директорию до ~
+    pretty_path=$(echo "$path" | sed "s|$HOME|~|")
+    
+    # Попробуем узнать время коммита, если папка доступна
+    time_ago=""
+    if [ -d "$path" ]; then
+       # Входим в subshell, чтобы не менять директорию скрипта
+       time_ago=$(cd "$path" && git log -1 --format="%cr" 2>/dev/null)
+    fi
+    
+    printf "% -40s ${GREEN}%-30s${NC} ${GRAY}%-20s${NC}\n" "$pretty_path" "$branch" "$time_ago"
+done

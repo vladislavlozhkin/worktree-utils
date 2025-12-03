@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# Usage: wt-kill <path-fragment-or-branch>
+
+QUERY=$1
+
+if [ -z "$QUERY" ]; then
+  echo "Использование: wt-kill <путь-или-ветка>"
+  exit 1
+fi
+
+# Пытаемся найти worktree, соответствующий запросу.
+# Игнорируем первую строку (Main Worktree), так как его удалять нельзя скриптом.
+# grep ищет совпадение в пути или имени ветки.
+MATCH_LINE=$(git worktree list | tail -n +2 | grep "$QUERY" | head -n 1)
+
+if [ -z "$MATCH_LINE" ]; then
+  echo "❌ Worktree, соответствующий '$QUERY', не найден (или это Main worktree)."
+  git worktree list
+  exit 1
+fi
+
+# Извлекаем путь и ветку из строки
+WT_PATH=$(echo "$MATCH_LINE" | awk '{print $1}')
+WT_BRANCH=$(echo "$MATCH_LINE" | awk '{print $3}' | sed 's/\[//;s/\]//')
+
+echo "🎯 Найден кандидат на удаление:"
+echo "   Папка: $WT_PATH"
+echo "   Ветка: $WT_BRANCH"
+echo ""
+echo "⚠️  Внимание: Папка будет удалена принудительно (--force)."
+read -p "Вы уверены? (y/N) " -n 1 -r
+echo ""
+
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Отмена."
+    exit 0
+fi
+
+# Удаляем worktree
+git worktree remove --force "$WT_PATH"
+
+if [ $? -eq 0 ]; then
+  echo "✅ Папка удалена."
+  
+  # Предлагаем удалить ветку
+  read -p "Удалить также ветку '$WT_BRANCH'? (y/N) " -n 1 -r
+  echo ""
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    git branch -D "$WT_BRANCH"
+    echo "✅ Ветка удалена."
+  fi
+else
+  echo "❌ Ошибка при удалении worktree."
+fi
