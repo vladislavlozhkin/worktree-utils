@@ -11,3 +11,4 @@ LINK scripts
 # COPY .env
 
 # Execution (Commands)
+# RUN npm install
