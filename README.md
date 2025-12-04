@@ -2,77 +2,57 @@
 
 Набор утилит для автоматизации работы с **Git Worktrees**. Упрощает создание изолированных окружений для параллельной разработки и экспериментов с AI.
 
-## Инструменты
+## Единый CLI: `wt`
 
-### 1. `scripts/wt-setup` (Environment Setup)
+Все утилиты доступны через единую команду `wt`.
 
-Скрипт настройки окружения (ранее `ai-link`).
+### Команды
 
-Синхронизирует конфигурационные файлы, секреты и скрипты из **Главного worktree** в текущее рабочее дерево.
+| Команда | Алиасы | Описание |
+| :--- | :--- | :--- |
+| `wt new <name>` | `create` | Создать новую задачу (ветку + папку + setup) |
+| `wt list` | `ls` | Показать список активных worktrees |
+| `wt kill <name>` | `rm` | Удалить worktree (добавьте `-D` для удаления ветки) |
+| `wt setup` | `init` | Настроить/обновить окружение в текущей папке |
 
-**Конфигурация:**
-Скрипт читает список файлов из двух источников:
-1.  **`.git/info/exclude`**: Все игнорируемые файлы автоматически линкуются (Symlink).
-2.  **`.worktree-config`**: Файл в корне проекта для явной настройки.
+### Конфигурация (`.worktree-config`)
 
-**Синтаксис `.worktree-config`:**
-Поддерживает три режима: `LINK`, `COPY` и `RUN`.
+Скрипт `wt setup` читает `.git/info/exclude` и `.worktree-config`.
+**Синтаксис:**
 ```text
-# По умолчанию создается симлинк
+# Ссылки (по умолчанию)
 scripts
-
-# Явное создание симлинка
 LINK .geminiignore
 
-# Копирование файла (полезно для .env)
+# Копирование (для локальных .env)
 COPY .env
 
-# Запуск команд (выполняются в context нового worktree)
+# Запуск команд
 RUN npm install
-RUN echo "Environment ready!"
 ```
-
-### 2. `scripts/wt-new` (Quick Start)
-
-Создает новую задачу одной командой:
-1.  Создает папку `../feature-name`.
-2.  Создает ветку `feature/name`.
-3.  Автоматически запускает `wt-setup`.
-
-### 3. `scripts/wt-kill` (Smart Cleanup)
-
-Безопасно удаляет worktree.
-*   `wt-kill feature/ui` — Удаляет только папку.
-*   `wt-kill feature/ui -D` — Удаляет папку И ветку.
-
-### 4. `scripts/wt-list` (Navigator)
-
-Показывает список worktrees с полезной информацией.
 
 ## Установка
 
-Рекомендуется создать глобальные ссылки:
+Достаточно создать **одну** ссылку на скрипт `wt`:
 
 ```bash
 mkdir -p ~/bin
-REPO_PATH=$(pwd)
-
-ln -sf "$REPO_PATH/scripts/wt-setup" ~/bin/wt-setup
-ln -sf "$REPO_PATH/scripts/wt-new"   ~/bin/wt-new
-ln -sf "$REPO_PATH/scripts/wt-kill"  ~/bin/wt-kill
-ln -sf "$REPO_PATH/scripts/wt-list"  ~/bin/wt-list
+ln -sf "$(pwd)/scripts/wt" ~/bin/wt
 ```
-*(Убедитесь, что `~/bin` есть в PATH)*
+*(Убедитесь, что `~/bin` есть в вашем PATH)*
 
-## Использование
+## Пример Workflow
 
 ```bash
-# Начать новую задачу
-wt-new feature/awesome-bot
+# 1. Начать новую задачу
+wt new feature/awesome-bot
 
-# (Внутри папки) Если нужно обновить конфиги
-wt-setup
+# 2. (Внутри папки) Если изменили конфиги или нужно пересобрать
+wt setup
 
-# Завершить работу
-wt-kill feature/awesome-bot -D
+# 3. Посмотреть, где мы
+wt list
+
+# 4. Завершить работу (удалить папку и ветку)
+wt rm feature/awesome-bot -D
 ```

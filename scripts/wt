@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# ==============================================================================
+# wt: Master CLI for Worktree Management
+# Роутер, вызывающий остальные скрипты из той же директории.
+# ==============================================================================
+
+# Определяем папку, где лежат скрипты (относительно этого файла)
+# Это позволяет запускать wt через симлинк
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+SUBCOMMAND="$1"
+shift # Сдвигаем аргументы, чтобы $1 ушел, а $2 стал $1 для под-скрипта
+
+show_help() {
+  echo "Usage: wt <command> [args]"
+  echo ""
+  echo "Commands:"
+  echo "  new, create   <name>   Создать новый worktree"
+  echo "  list, ls               Показать список worktrees"
+  echo "  kill, rm      <name>   Удалить worktree"
+  echo "  setup, init            Настроить окружение (линки, копии)"
+  echo "  help                   Показать это сообщение"
+  echo ""
+}
+
+if [ -z "$SUBCOMMAND" ]; then
+  show_help
+  exit 1
+fi
+
+case "$SUBCOMMAND" in
+  new|create)
+    "$SCRIPT_DIR/wt-new" "$@"
+    ;;
+  list|ls)
+    "$SCRIPT_DIR/wt-list" "$@"
+    ;;
+  kill|rm|delete)
+    "$SCRIPT_DIR/wt-kill" "$@"
+    ;;
+  setup|init)
+    "$SCRIPT_DIR/wt-setup" "$@"
+    ;;
+  help|--help|-h)
+    show_help
+    ;;
+  *)
+    echo "❌ Неизвестная команда: $SUBCOMMAND"
+    show_help
+    exit 1
+    ;;
+esac
