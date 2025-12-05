@@ -1,0 +1,75 @@
+#!/bin/bash
+
+# Usage: wt-task "Task Title" [type]
+# Types: todo (default), analysis, brief, feature
+
+TITLE="$1"
+TYPE="${2:-todo}"
+
+if [ -z "$TITLE" ]; then
+  echo "Error: Title is required."
+  echo "Usage: wt-task \"Task Title\" [todo|analysis|brief|feature]"
+  exit 1
+fi
+
+# Validate Type
+VALID_TYPES=("todo" "analysis" "brief" "feature")
+IS_VALID=0
+for t in "${VALID_TYPES[@]}"; do
+  if [ "$t" == "$TYPE" ]; then
+    IS_VALID=1
+    break
+  fi
+done
+
+if [ $IS_VALID -eq 0 ]; then
+  echo "Error: Invalid task type '$TYPE'."
+  echo "Available types: ${VALID_TYPES[*]}"
+  exit 1
+fi
+
+# Project Root Setup
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TEMPLATE_DIR="$PROJECT_ROOT/templates"
+TASKS_DIR="$PROJECT_ROOT/docs/tasks"
+
+# Ensure directories exist
+mkdir -p "$TASKS_DIR"
+
+# 1. Prepare Variables
+DATE_ISO=$(date +"%Y-%m-%d")
+TIME_HM=$(date +"%H-%M")
+TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+
+# Sanitize title for filename
+SAFE_TITLE=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g')
+FILENAME="${DATE_ISO}_${TIME_HM}-${SAFE_TITLE}.md"
+FILE_PATH="$TASKS_DIR/$FILENAME"
+
+# Generate ID
+# Using a short hash of title + time to be reasonably unique but short
+ID_HASH=$(echo "$TITLE$TIMESTAMP" | cksum | cut -f1 -d" ")
+TASK_ID="TASK-${ID_HASH}"
+
+# 2. Read Template
+TEMPLATE_FILE="$TEMPLATE_DIR/$TYPE.md"
+
+if [ ! -f "$TEMPLATE_FILE" ]; then
+  echo "Error: Template '$TYPE' not found in $TEMPLATE_DIR"
+  exit 1
+fi
+
+CONTENT=$(cat "$TEMPLATE_FILE")
+
+# 3. Replace Placeholders
+# Using perl for robust replacement
+CONTENT=$(echo "$CONTENT" | perl -pe "s/\\{\\{TITLE\\}\\}/$TITLE/g")
+CONTENT=$(echo "$CONTENT" | perl -pe "s/\\{\\{DATE\\}\\}/$TIMESTAMP/g")
+CONTENT=$(echo "$CONTENT" | perl -pe "s/\\{\\{ID\\}\\}/$TASK_ID/g")
+
+# 4. Write File
+echo "$CONTENT" > "$FILE_PATH"
+
+echo "✅ Task created: $FILE_PATH"
+echo "🆔 ID: $TASK_ID"
