@@ -20,7 +20,7 @@ if [ ! -d "$TARGET_DIR" ]; then
 fi
 
 # 2. Define the list of scripts to download
-SCRIPTS=("wt" "wt-new" "wt-setup" "wt-list" "wt-kill" "wt-task")
+SCRIPTS=("wt" "wt-new" "wt-setup" "wt-list" "wt-kill" "wt-lib.sh")
 
 # 3. Download each script
 for script in "${SCRIPTS[@]}"; do

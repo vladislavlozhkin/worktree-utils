@@ -1,74 +1,123 @@
 #!/bin/bash
 
-# Usage: wt-kill <path-fragment-or-branch> [-D|--delete-branch]
+# ==============================================================================
+# wt-kill: Remove a worktree (and optionally its branch).
+# Usage: wt-kill <path-fragment-or-branch> [-D|--delete-branch] [-y|--yes]
+# ==============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=wt-lib.sh
+. "$SCRIPT_DIR/wt-lib.sh"
 
 QUERY=""
 DELETE_BRANCH=false
+ASSUME_YES=false
 
-# Простой парсинг аргументов
 for arg in "$@"; do
-  case $arg in
-    -D|--delete-branch)
-      DELETE_BRANCH=true
-      ;;
+  case "$arg" in
+    -D|--delete-branch) DELETE_BRANCH=true ;;
+    -y|--yes)           ASSUME_YES=true ;;
+    -h|--help)
+      echo "Usage: wt-kill <path-or-branch> [-D|--delete-branch] [-y|--yes]"
+      exit 0 ;;
     *)
-      if [ -z "$QUERY" ]; then
-        QUERY="$arg"
-      fi
+      [ -z "$QUERY" ] && QUERY="$arg"
       ;;
   esac
 done
 
 if [ -z "$QUERY" ]; then
-  echo "Использование: wt-kill <путь-или-ветка> [-D|--delete-branch]"
+  echo "Использование: wt-kill <путь-или-ветка> [-D|--delete-branch] [-y|--yes]"
   echo "   -D, --delete-branch: Удалить также связанную git-ветку"
+  echo "   -y, --yes:           Не запрашивать подтверждение"
   exit 1
 fi
 
-# Пытаемся найти worktree, соответствующий запросу.
-# Игнорируем первую строку (Main Worktree), так как его удалять нельзя скриптом.
-# grep ищет совпадение в пути или имени ветки.
-MATCH_LINE=$(git worktree list | tail -n +2 | grep "$QUERY" | head -n 1)
+# Collect candidates: skip first record (main worktree — protected).
+CANDIDATES=()
+INDEX=0
+while IFS=$'\t' read -r path branch _head; do
+  INDEX=$((INDEX + 1))
+  [ "$INDEX" -eq 1 ] && continue
+  if [[ "$path" == *"$QUERY"* ]] || [[ "$branch" == *"$QUERY"* ]]; then
+    CANDIDATES+=("$path"$'\t'"$branch")
+  fi
+done < <(wt_list_worktrees)
 
-if [ -z "$MATCH_LINE" ]; then
+if [ "${#CANDIDATES[@]}" -eq 0 ]; then
   echo "❌ Worktree, соответствующий '$QUERY', не найден (или это Main worktree)."
-  git worktree list
+  echo ""
+  echo "Доступные worktrees:"
+  wt_list_worktrees | awk -F'\t' 'NR>1{printf "   %s  [%s]\n", $1, $2}'
   exit 1
 fi
 
-# Извлекаем путь и ветку из строки
-WT_PATH=$(echo "$MATCH_LINE" | awk '{print $1}')
-WT_BRANCH=$(echo "$MATCH_LINE" | awk '{print $3}' | sed 's/\[//;s/\]//')
-
-echo "🎯 Найден кандидат на удаление:"
-echo "   Папка: $WT_PATH"
-echo "   Ветка: $WT_BRANCH"
-if [ "$DELETE_BRANCH" = true ]; then
-    echo "   🗑  ВЕТКА БУДЕТ УДАЛЕНА! (-D)"
-fi
-echo ""
-echo "⚠️  Внимание: Папка будет удалена принудительно (--force)."
-read -p "Вы уверены? (y/N) " -n 1 -r
-echo ""
-
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+# If multiple matches: ask user to disambiguate.
+SELECTED=""
+if [ "${#CANDIDATES[@]}" -gt 1 ]; then
+  echo "🔎 Найдено ${#CANDIDATES[@]} совпадений для '$QUERY':"
+  i=1
+  for entry in "${CANDIDATES[@]}"; do
+    p="${entry%%$'\t'*}"
+    b="${entry#*$'\t'}"
+    printf "  %d) %s  [%s]\n" "$i" "$p" "$b"
+    i=$((i + 1))
+  done
+  echo ""
+  read -r -p "Выберите номер (или Enter для отмены): " CHOICE
+  if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt "${#CANDIDATES[@]}" ]; then
     echo "Отмена."
     exit 0
+  fi
+  SELECTED="${CANDIDATES[$((CHOICE - 1))]}"
+else
+  SELECTED="${CANDIDATES[0]}"
 fi
 
-# Удаляем worktree
-git worktree remove --force "$WT_PATH"
+WT_PATH="${SELECTED%%$'\t'*}"
+WT_BRANCH="${SELECTED#*$'\t'}"
 
-if [ $? -eq 0 ]; then
+echo "🎯 Цель удаления:"
+echo "   Папка: $WT_PATH"
+echo "   Ветка: $WT_BRANCH"
+[ "$DELETE_BRANCH" = true ] && echo "   🗑  Ветка будет удалена (-D)"
+
+if [ "$ASSUME_YES" != true ]; then
+  read -r -p "Продолжить? (y/N) " -n 1 REPLY
+  echo ""
+  [[ ! "$REPLY" =~ ^[Yy]$ ]] && { echo "Отмена."; exit 0; }
+fi
+
+# Try a non-forced removal first; only escalate if it actually fails.
+if git worktree remove "$WT_PATH" 2>/tmp/wt-kill-err.$$; then
   echo "✅ Папка удалена."
-  
-  # Удаляем ветку только если был флаг
-  if [ "$DELETE_BRANCH" = true ]; then
-    git branch -D "$WT_BRANCH"
+else
+  err=$(cat /tmp/wt-kill-err.$$)
+  rm -f /tmp/wt-kill-err.$$
+  echo "⚠️  git worktree remove отказался удалять $WT_PATH:"
+  printf '     %s\n' "${err//$'\n'/$'\n     '}"
+
+  if [ "$ASSUME_YES" != true ]; then
+    read -r -p "Удалить принудительно (--force)? Несохранённые изменения будут потеряны. (y/N) " -n 1 FORCE_REPLY
+    echo ""
+    [[ ! "$FORCE_REPLY" =~ ^[Yy]$ ]] && { echo "Отмена."; exit 1; }
+  fi
+
+  if git worktree remove --force "$WT_PATH"; then
+    echo "✅ Папка удалена (force)."
+  else
+    echo "❌ Не удалось удалить worktree даже с --force."
+    exit 1
+  fi
+fi
+rm -f /tmp/wt-kill-err.$$
+
+if [ "$DELETE_BRANCH" = true ] && [ -n "$WT_BRANCH" ] && [ "$WT_BRANCH" != "(detached)" ]; then
+  if git branch -D "$WT_BRANCH"; then
     echo "✅ Ветка '$WT_BRANCH' удалена."
   else
-    echo "ℹ️  Ветка '$WT_BRANCH' сохранена (используйте -D для удаления)."
+    echo "⚠️  Не удалось удалить ветку '$WT_BRANCH'."
   fi
 else
-  echo "❌ Ошибка при удалении worktree."
+  [ "$DELETE_BRANCH" != true ] && echo "ℹ️  Ветка '$WT_BRANCH' сохранена (используйте -D для удаления)."
 fi

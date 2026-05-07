@@ -1,35 +1,87 @@
 #!/bin/bash
 
-# Цвета
+# ==============================================================================
+# wt-list: Show all worktrees with branch, status and last-commit info.
+# ==============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=wt-lib.sh
+. "$SCRIPT_DIR/wt-lib.sh"
+
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
 BLUE='\033[0;34m'
 GRAY='\033[0;90m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-printf "${BLUE}%-40s %-30s %-20s${NC}\n" "PATH" "BRANCH" "LAST COMMIT"
-echo "------------------------------------------------------------------------------------------"
+# Pad a string to a fixed visual width (right-pad with spaces).
+pad() {
+  local text="$1" width="$2"
+  printf '%s%*s' "$text" $((width - ${#text})) ''
+}
 
-# Читаем список worktree
-git worktree list | while read -r line; do
-    path=$(echo "$line" | awk '{print $1}')
-    commit=$(echo "$line" | awk '{print $2}')
-    branch=$(echo "$line" | awk '{print $3}' | sed 's/\[//;s/\]//')
-    
-    # Получаем относительное время последнего коммита
-    # Используем git log -1 --format="%cr" в контексте того пути
-    # Но git log работает с репозиторием. Для worktree это проще сделать, просто посмотрев на HEAD
-    # Нюанс: чтобы выполнить команду git log для другого worktree, нужно туда зайти или указать gitdir
-    
-    # Простое решение: выводим то, что есть, немного форматируя.
-    # Для красоты сократим домашнюю директорию до ~
-    pretty_path=$(echo "$path" | sed "s|$HOME|~|")
-    
-    # Попробуем узнать время коммита, если папка доступна
-    time_ago=""
-    if [ -d "$path" ]; then
-       # Входим в subshell, чтобы не менять директорию скрипта
-       time_ago=$(cd "$path" && git log -1 --format="%cr" 2>/dev/null)
+# Print a row, applying colour only to the status cell so column widths stay correct.
+print_row() {
+  local path="$1" branch="$2" status="$3" ahead_behind="$4" time_ago="$5" status_color="$6"
+
+  local path_pad branch_pad status_pad ahead_pad
+  path_pad=$(pad "$path" 40)
+  branch_pad=$(pad "$branch" 28)
+  status_pad=$(pad "$status" 10)
+  ahead_pad=$(pad "$ahead_behind" 12)
+
+  if [ -n "$status_color" ]; then
+    printf '%s %b%s%b %b%s%b %s %b%s%b\n' \
+      "$path_pad" \
+      "$GREEN" "$branch_pad" "$NC" \
+      "$status_color" "$status_pad" "$NC" \
+      "$ahead_pad" \
+      "$GRAY" "$time_ago" "$NC"
+  else
+    printf '%s %s %s %s %s\n' "$path_pad" "$branch_pad" "$status_pad" "$ahead_pad" "$time_ago"
+  fi
+}
+
+# Header
+header_path=$(pad "PATH" 40)
+header_branch=$(pad "BRANCH" 28)
+header_status=$(pad "STATUS" 10)
+header_ahead=$(pad "AHEAD/BEH" 12)
+printf '%b%s %s %s %s %s%b\n' "$BLUE" "$header_path" "$header_branch" "$header_status" "$header_ahead" "LAST COMMIT" "$NC"
+printf -- '------------------------------------------------------------------------------------------------------------\n'
+
+while IFS=$'\t' read -r path branch _head; do
+  [ -z "$path" ] && continue
+
+  pretty_path="${path/#$HOME/~}"
+
+  status="missing"
+  ahead_behind="-"
+  time_ago=""
+  status_color="$RED"
+
+  if [ -d "$path" ]; then
+    if dirty=$(git -C "$path" status --porcelain 2>/dev/null); then
+      if [ -z "$dirty" ]; then
+        status="clean"
+        status_color="$GREEN"
+      else
+        status="dirty"
+        status_color="$YELLOW"
+      fi
     fi
-    
-    printf "% -40s ${GREEN}%-30s${NC} ${GRAY}%-20s${NC}\n" "$pretty_path" "$branch" "$time_ago"
-done
+
+    if upstream=$(git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null); then
+      if counts=$(git -C "$path" rev-list --left-right --count "HEAD...$upstream" 2>/dev/null); then
+        ahead=$(echo "$counts" | awk '{print $1}')
+        behind=$(echo "$counts" | awk '{print $2}')
+        ahead_behind="+${ahead}/-${behind}"
+      fi
+    fi
+
+    time_ago=$(git -C "$path" log -1 --format="%cr" 2>/dev/null)
+  fi
+
+  print_row "$pretty_path" "$branch" "$status" "$ahead_behind" "$time_ago" "$status_color"
+done < <(wt_list_worktrees)

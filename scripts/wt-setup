@@ -1,20 +1,26 @@
 #!/bin/bash
 
 # ==============================================================================
-# wt-setup: Worktree Environment Setup Utility
-# 
-# Синхронизирует файлы из Главного Worktree (Main) в текущий.
-# Поддерживает действия: LINK (симлинк), COPY (копирование).
-# Читает конфигурацию из:
-# 1. .git/info/exclude (всегда как LINK)
-# 2. .worktree-config (явные правила: "VERB FILE")
+# wt-setup: Synchronise files from the main worktree into the current one.
+#
+# Reads two sources (in order; first wins per file):
+#   1. .worktree-config in the main worktree (LINK / COPY / RUN).
+#   2. .git/info/exclude (treated as LINK).
+#
+# Config syntax: "[VERB] PATH"  — first whitespace splits VERB and the rest.
+# A line without a known VERB is treated as "LINK PATH".
+# Lines starting with '#' or empty are ignored.
+#
+# WARNING: `RUN` lines are evaluated in the shell. The .worktree-config file
+# is configuration with the same trust level as a Makefile — never source one
+# from an untrusted repository.
 # ==============================================================================
 
-# --- 1. Определение контекста ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=wt-lib.sh
+. "$SCRIPT_DIR/wt-lib.sh"
 
-# Находим Main Worktree (первая строка в списке)
-MAIN_WORKTREE=$(git worktree list | head -n 1 | awk '{print $1}')
-
+MAIN_WORKTREE=$(wt_main_worktree)
 if [ -z "$MAIN_WORKTREE" ]; then
   echo "❌ Ошибка: Не удалось определить Main Worktree."
   exit 1
@@ -22,135 +28,135 @@ fi
 
 echo "🔍 Main Worktree: $MAIN_WORKTREE"
 
-# Определяем пути к конфигам
 GIT_COMMON_DIR=$(git rev-parse --git-common-dir)
 EXCLUDE_FILE="$GIT_COMMON_DIR/info/exclude"
 CONFIG_FILE="$MAIN_WORKTREE/.worktree-config"
 
-# Массив задач в формате "ACTION|FILE"
+# Tasks are stored as TAB-separated "ACTION<TAB>SOURCE<TAB>ARG" so paths can
+# hold spaces. SOURCE is "config" (from .worktree-config) or "exclude"
+# (from .git/info/exclude) — config entries are explicit user intent and may
+# overwrite tracked files; exclude entries are conservative and never do.
 TASKS=()
+SEEN_PATHS=()
 
-# --- 2. Функции парсинга ---
+# Add a task while deduplicating LINK/COPY entries (first wins).
+add_task() {
+  local action="$1" source="$2" arg="$3"
 
-# Функция: parse_exclude_file
-# Читает .git/info/exclude, где каждая строка — это файл для LINK
-parse_exclude_file() {
-  local file="$1"
-  if [ -f "$file" ]; then
-    echo "📄 Читаем exclude: $file"
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      line=$(echo "$line" | xargs) # Trim
-      if [[ "$line" =~ ^#.* ]] || [[ -z "$line" ]]; then continue; fi
-      TASKS+=("LINK|$line")
-    done < "$file"
+  if [ "$action" != "RUN" ]; then
+    local seen
+    for seen in "${SEEN_PATHS[@]}"; do
+      [ "$seen" = "$arg" ] && return 0
+    done
+    SEEN_PATHS+=("$arg")
   fi
+  TASKS+=("$action"$'\t'"$source"$'\t'"$arg")
 }
 
-# Функция: parse_config_file
-# Читает .worktree-config, поддерживая синтаксис "VERB FILE"
+# Parse .worktree-config. Splits on the FIRST run of whitespace only,
+# so RUN commands and paths with spaces survive intact.
 parse_config_file() {
   local file="$1"
-  if [ -f "$file" ]; then
-    echo "📄 Читаем config:  $file"
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      line=$(echo "$line" | xargs) # Trim
-      if [[ "$line" =~ ^#.* ]] || [[ -z "$line" ]]; then continue; fi
+  [ -f "$file" ] || return 0
 
-      # Разбиваем строку на слова
-      # Пример: "COPY .env" -> arg1="COPY", arg2=".env"
-      # Пример: "scripts"   -> arg1="scripts", arg2=""
-      read -r arg1 arg2 <<< "$line"
+  echo "📄 Читаем config:  $file"
 
-      if [ -n "$arg2" ]; then
-        # Формат: VERB FILE
-        local verb=$(echo "$arg1" | tr '[:lower:]' '[:upper:]')
-        TASKS+=("$verb|$arg2")
-      else
-        # Формат: FILE (по умолчанию LINK)
-        TASKS+=("LINK|$arg1")
-      fi
-    done < "$file"
-  fi
+  local raw verb rest
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    [[ -z "$raw" ]] && continue
+    [[ "$raw" == \#* ]] && continue
+
+    if [[ "$raw" =~ ^([A-Za-z]+)[[:space:]]+(.+)$ ]]; then
+      verb="${BASH_REMATCH[1]^^}"
+      rest="${BASH_REMATCH[2]}"
+      case "$verb" in
+        LINK|COPY|RUN) add_task "$verb" "config" "$rest" ;;
+        *) add_task "LINK" "config" "$raw" ;;  # Verb wasn't recognised; treat the whole line as a path.
+      esac
+    else
+      add_task "LINK" "config" "$raw"
+    fi
+  done < "$file"
 }
 
-# --- 3. Сбор задач ---
+# Parse .git/info/exclude — every non-comment, non-blank line is a LINK target.
+parse_exclude_file() {
+  local file="$1"
+  [ -f "$file" ] || return 0
 
-# Сначала читаем конфиг (чтобы пользовательские COPY перекрывали дефолтный LINK из exclude, если нужно)
-# Но так как мы обрабатываем последовательно, порядок важен для приоритета.
-# Логика: Мы будем обрабатывать список и если файл уже обработан (существует), пропускать.
-# Значит, более важные правила должны идти первыми?
-# Нет, мы сделаем проще: добавим всё, а при исполнении проверим.
+  echo "📄 Читаем exclude: $file"
+
+  local raw
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    [[ -z "$raw" ]] && continue
+    [[ "$raw" == \#* ]] && continue
+    add_task "LINK" "exclude" "$raw"
+  done < "$file"
+}
 
 parse_config_file "$CONFIG_FILE"
 parse_exclude_file "$EXCLUDE_FILE"
 
-
-# --- 4. Исполнение ---
-
 echo "⚙️  Настройка окружения..."
 
 for TASK in "${TASKS[@]}"; do
-  ACTION="${TASK%%|*}"
-  ITEM="${TASK#*|}"
-  
-  # === Обработка команд RUN ===
-  if [ "$ACTION" == "RUN" ]; then
+  ACTION="${TASK%%$'\t'*}"
+  REST="${TASK#*$'\t'}"
+  TASK_SOURCE="${REST%%$'\t'*}"
+  ITEM="${REST#*$'\t'}"
+
+  if [ "$ACTION" = "RUN" ]; then
     echo "🚀 RUN: $ITEM"
     eval "$ITEM"
     continue
   fi
 
-  # === Обработка файлов (LINK / COPY) ===
-  
-  SOURCE="$MAIN_WORKTREE/$ITEM"
-  TARGET="./$ITEM"
-
-  # 1. Пропускаем glob-паттерны (*.log), мы их не умеем обрабатывать
-  if [[ "$ITEM" == *"*"* ]]; then continue; fi
-
-  # 2. Пропускаем, если исходного файла нет в Main
-  if [ ! -e "$SOURCE" ]; then
-    # echo "⚪️ Пропущено: $ITEM (нет в источнике)"
+  if [[ "$ITEM" == *"*"* ]] || [[ "$ITEM" == *"?"* ]] || [[ "$ITEM" == *"["* ]]; then
+    echo "⚪️ Пропущено: $ITEM (glob-паттерны не поддерживаются)"
     continue
   fi
 
-  # 3. Проверка целевого файла
-  if [ -e "$TARGET" ]; then
-    # Если файл уже существует
-    
-    # Если мы хотим COPY, а там LINK -> удаляем линк, копируем
-    if [ "$ACTION" == "COPY" ] && [ -L "$TARGET" ]; then
-       rm "$TARGET"
-       # Продолжаем выполнение (переходим к cp)
-    
-    # Если мы хотим LINK, а там уже LINK -> обновляем (безопасно)
-    elif [ "$ACTION" == "LINK" ] && [ -L "$TARGET" ]; then
-       ln -sf "$SOURCE" "$TARGET"
-       # echo "🔄 Обновлен линк: $ITEM"
-       continue
+  SRC="$MAIN_WORKTREE/$ITEM"
+  TGT="./$ITEM"
 
-    # Если там реальный файл (не линк), мы его НЕ трогаем (Safety first)
-    elif [ ! -L "$TARGET" ]; then
-       echo "⚠️  Пропущено: $ITEM (существует локальный файл, не перезаписываю)"
-       continue
+  if [ ! -e "$SRC" ] && [ ! -L "$SRC" ]; then
+    continue
+  fi
+
+  if [ -e "$TGT" ] || [ -L "$TGT" ]; then
+    if [ -L "$TGT" ]; then
+      # Existing symlink — safe to replace under any verb.
+      rm "$TGT"
+    elif [ "$TASK_SOURCE" = "config" ] \
+         && git ls-files --error-unmatch -- "$ITEM" >/dev/null 2>&1 \
+         && [ -z "$(git status --porcelain -- "$ITEM" 2>/dev/null)" ]; then
+      # Tracked & clean file that the user explicitly listed in config.
+      # Safe to replace — the contents live in git.
+      rm -rf "$TGT"
+    else
+      echo "⚠️  Пропущено: $ITEM (существует локальный файл, не перезаписываю)"
+      continue
     fi
   fi
 
-  # 4. Выполнение действия
-  if [ "$ACTION" == "COPY" ]; then
-     # Если целевой файл всё еще существует (например, это был симлинк, который мы удалили выше),
-     # значит путь свободен. Если это был файл, мы бы вышли по continue выше.
-     
-     cp -R "$SOURCE" "$TARGET"
-     echo "📋 COPY: $ITEM"
-     
-  elif [ "$ACTION" == "LINK" ]; then
-     ln -sf "$SOURCE" "$TARGET"
-     echo "🔗 LINK: $ITEM"
-  else
-     echo "❓ Неизвестное действие: $ACTION для $ITEM"
+  TGT_PARENT=$(dirname "$TGT")
+  if [ ! -d "$TGT_PARENT" ]; then
+    mkdir -p "$TGT_PARENT"
   fi
 
+  if [ "$ACTION" = "COPY" ]; then
+    cp -R "$SRC" "$TGT"
+    echo "📋 COPY: $ITEM"
+  elif [ "$ACTION" = "LINK" ]; then
+    ln -sfn "$SRC" "$TGT"
+    echo "🔗 LINK: $ITEM"
+  else
+    echo "❓ Неизвестное действие: $ACTION для $ITEM"
+  fi
 done
 
 echo "🎉 Готово!"

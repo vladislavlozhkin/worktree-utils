@@ -1,6 +1,16 @@
 #!/bin/bash
 
+# ==============================================================================
+# wt-new: Create a new worktree (branch + folder + setup).
 # Usage: wt-new <branch-name> [base-branch]
+#
+# Honours the WT_BASE_DIR env variable (also read from .env / .env.local
+# in the main worktree) to override the default placement of the new folder.
+# ==============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=wt-lib.sh
+. "$SCRIPT_DIR/wt-lib.sh"
 
 BRANCH_NAME=$1
 BASE_BRANCH=${2:-HEAD}
@@ -11,47 +21,71 @@ if [ -z "$BRANCH_NAME" ]; then
   exit 1
 fi
 
-# Преобразуем имя ветки в имя папки (заменяем слэши на дефисы)
-# feature/login -> feature-login
-DIR_NAME=${BRANCH_NAME//\//-}
-
-# Путь к новому worktree (создаем на уровень выше текущей папки)
-TARGET_DIR="../$DIR_NAME"
-
-# Проверяем, не занята ли папка
-if [ -d "$TARGET_DIR" ]; then
-   echo "❌ Ошибка: Папка $TARGET_DIR уже существует."
-   exit 1
+# Make sure we are inside a git repository.
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "❌ Текущая папка не является git-репозиторием."
+  exit 1
 fi
 
-echo "🚀 Создаем worktree..."
+# Validate the branch name through git itself — rejects '..', spaces, etc.
+if ! git check-ref-format --branch "$BRANCH_NAME" >/dev/null 2>&1; then
+  echo "❌ Недопустимое имя ветки: '$BRANCH_NAME'"
+  echo "   Имя должно соответствовать правилам git (см. git-check-ref-format)."
+  exit 1
+fi
+
+# Refuse to create the same branch twice.
+if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+  echo "❌ Ветка '$BRANCH_NAME' уже существует."
+  exit 1
+fi
+
+# Folder name from branch name: feature/login -> feature-login.
+DIR_NAME=${BRANCH_NAME//\//-}
+
+# Resolve target directory.
+MAIN_WT=$(wt_main_worktree)
+wt_load_env_vars "$MAIN_WT"
+
+if [ -n "$WT_BASE_DIR" ]; then
+  # Expand ~ if present (user-controlled value).
+  EXPANDED_BASE="${WT_BASE_DIR/#\~/$HOME}"
+  TARGET_DIR="$EXPANDED_BASE/$DIR_NAME"
+else
+  TARGET_DIR="../$DIR_NAME"
+fi
+
+if [ -e "$TARGET_DIR" ]; then
+  echo "❌ Ошибка: Путь $TARGET_DIR уже существует."
+  exit 1
+fi
+
+# Make sure the parent directory exists when WT_BASE_DIR is set.
+PARENT_DIR=$(dirname "$TARGET_DIR")
+if [ ! -d "$PARENT_DIR" ]; then
+  mkdir -p "$PARENT_DIR" || { echo "❌ Не удалось создать $PARENT_DIR"; exit 1; }
+fi
+
+echo "🚀 Создаём worktree..."
 echo "   Ветка: $BRANCH_NAME"
 echo "   Папка: $TARGET_DIR"
 echo "   База:  $BASE_BRANCH"
 
-# Создаем worktree
-git worktree add -b "$BRANCH_NAME" "$TARGET_DIR" "$BASE_BRANCH"
-RET=$?
-
-if [ $RET -ne 0 ]; then
+if ! git worktree add -b "$BRANCH_NAME" "$TARGET_DIR" "$BASE_BRANCH"; then
   echo "❌ Ошибка при создании worktree."
-  exit $RET
+  exit 1
 fi
 
-# Автоматический запуск wt-setup
-# Нам нужно найти скрипт wt-setup. Мы знаем, что он лежит в главном worktree.
-MAIN_WT=$(git worktree list | head -n 1 | awk '{print $1}')
+# Run wt-setup inside the new directory.
 SETUP_SCRIPT="$MAIN_WT/scripts/wt-setup"
-
 if [ -x "$SETUP_SCRIPT" ]; then
   echo "🔗 Запускаем wt-setup..."
-  # Запускаем скрипт ВНУТРИ новой папки
   (cd "$TARGET_DIR" && "$SETUP_SCRIPT")
 else
   echo "⚠️  Скрипт wt-setup не найден по пути: $SETUP_SCRIPT"
-  echo "   Вам придется настроить окружение вручную."
+  echo "   Окружение придётся настроить вручную."
 fi
 
 echo ""
 echo "✅ Готово! Для начала работы:"
-echo "cd $TARGET_DIR"
+echo "   cd $TARGET_DIR"
