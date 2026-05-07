@@ -8,14 +8,7 @@
 # in the main worktree) to override the default placement of the new folder.
 # ==============================================================================
 
-__src="${BASH_SOURCE[0]}"
-while [ -L "$__src" ]; do
-  __dir=$(cd -P "$(dirname "$__src")" && pwd)
-  __src=$(readlink "$__src")
-  [[ "$__src" != /* ]] && __src="$__dir/$__src"
-done
-SCRIPT_DIR="$(cd -P "$(dirname "$__src")" && pwd)"
-unset __src __dir
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR source=wt-lib.sh
 . "$SCRIPT_DIR/wt-lib.sh"
 
