@@ -8,7 +8,14 @@
 # in the main worktree) to override the default placement of the new folder.
 # ==============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+__src="${BASH_SOURCE[0]}"
+while [ -L "$__src" ]; do
+  __dir=$(cd -P "$(dirname "$__src")" && pwd)
+  __src=$(readlink "$__src")
+  [[ "$__src" != /* ]] && __src="$__dir/$__src"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$__src")" && pwd)"
+unset __src __dir
 # shellcheck source-path=SCRIPTDIR source=wt-lib.sh
 . "$SCRIPT_DIR/wt-lib.sh"
 
@@ -101,8 +108,10 @@ else
   fi
 fi
 
-# Run wt-setup inside the new directory.
-SETUP_SCRIPT="$MAIN_WT/scripts/wt-setup"
+# Run wt-setup inside the new directory. Look next to ourselves so that
+# global installs (~/bin/wt -> .../scripts/wt) keep working — there is no
+# scripts/ folder inside the user's repo in that mode.
+SETUP_SCRIPT="$SCRIPT_DIR/wt-setup"
 if [ -x "$SETUP_SCRIPT" ]; then
   echo "🔗 Запускаем wt-setup..."
   (cd "$TARGET_DIR" && "$SETUP_SCRIPT")

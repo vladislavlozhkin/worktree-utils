@@ -317,6 +317,24 @@ run_test "WT_BASE_DIR from real env beats .env values" '
   fi
 '
 
+# ------------------------------------------------------------------------------
+# Global-install scenario: symlink wt into a separate ~/bin-style dir, with
+# no scripts/ inside the user repo at all. Mirrors the README install path.
+run_test "wt works when invoked through a symlink (global install)" '
+  bin_dir="$TEST_DIR/bin"
+  mkdir -p "$bin_dir"
+  ln -sf "$SCRIPTS_DIR/wt" "$bin_dir/wt"
+  # Remove the in-repo copy of scripts to make sure the global wt does not
+  # secretly depend on it.
+  rm -rf "$MAIN_REPO/scripts"
+  git add -A && git commit -q -m "drop scripts dir"
+
+  "$bin_dir/wt" new feat/global >/dev/null
+  assert_file_exists "$MAIN_REPO/../feat-global/.git"
+  out=$("$bin_dir/wt" list 2>&1)
+  echo "$out" | grep -q "feat/global" || fail "feat/global not in list"
+'
+
 echo
 echo "================================================="
 echo "Passed: $PASS  Failed: $FAIL"

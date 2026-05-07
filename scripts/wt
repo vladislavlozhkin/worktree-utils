@@ -5,9 +5,16 @@
 # Роутер, вызывающий остальные скрипты из той же директории.
 # ==============================================================================
 
-# Определяем папку, где лежат скрипты (относительно этого файла)
-# Это позволяет запускать wt через симлинк
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve real script directory through symlinks so that
+# `ln -s .../scripts/wt ~/bin/wt` keeps the router pointing at its siblings.
+__src="${BASH_SOURCE[0]}"
+while [ -L "$__src" ]; do
+  __dir=$(cd -P "$(dirname "$__src")" && pwd)
+  __src=$(readlink "$__src")
+  [[ "$__src" != /* ]] && __src="$__dir/$__src"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$__src")" && pwd)"
+unset __src __dir
 
 SUBCOMMAND="$1"
 shift # Сдвигаем аргументы, чтобы $1 ушел, а $2 стал $1 для под-скрипта

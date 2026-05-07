@@ -2,8 +2,9 @@
 
 # ==============================================================================
 # wt-lib.sh: Shared helpers for worktree-utils.
-# Source this file from any wt-* script:
-#     . "$(dirname "${BASH_SOURCE[0]}")/wt-lib.sh"
+# Sourced from each wt-* script. Each caller computes SCRIPT_DIR by resolving
+# its own BASH_SOURCE[0] through symlinks (so `ln -s .../scripts/wt ~/bin/wt`
+# still finds its sibling scripts), then sources this file from there.
 # ==============================================================================
 
 # wt_main_worktree
