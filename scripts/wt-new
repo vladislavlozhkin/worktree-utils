@@ -34,10 +34,28 @@ if ! git check-ref-format --branch "$BRANCH_NAME" >/dev/null 2>&1; then
   exit 1
 fi
 
-# Refuse to create the same branch twice.
+# Decide whether the branch already exists (we'll attach to it) or not (we'll
+# create it via `-b`). If it does exist, also figure out whether some other
+# worktree currently holds it.
+BRANCH_EXISTS=false
+EXISTING_WT_PATH=""
 if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
-  echo "❌ Ветка '$BRANCH_NAME' уже существует."
-  exit 1
+  BRANCH_EXISTS=true
+  EXISTING_WT_PATH=$(git worktree list --porcelain | awk -v b="branch refs/heads/$BRANCH_NAME" '
+    /^worktree /{ p = substr($0, 10) }
+    $0 == b      { print p; exit }
+  ')
+
+  if [ -n "$EXISTING_WT_PATH" ] && [ -d "$EXISTING_WT_PATH" ]; then
+    echo "❌ Ветка '$BRANCH_NAME' уже подключена к worktree: $EXISTING_WT_PATH"
+    exit 1
+  fi
+
+  if [ -n "$EXISTING_WT_PATH" ]; then
+    # Stale registration: the folder is gone, the metadata is not.
+    echo "⚠️  Папка $EXISTING_WT_PATH удалена вручную. Чищу stale-запись..."
+    git worktree prune
+  fi
 fi
 
 # Folder name from branch name: feature/login -> feature-login.
@@ -69,11 +87,18 @@ fi
 echo "🚀 Создаём worktree..."
 echo "   Ветка: $BRANCH_NAME"
 echo "   Папка: $TARGET_DIR"
-echo "   База:  $BASE_BRANCH"
-
-if ! git worktree add -b "$BRANCH_NAME" "$TARGET_DIR" "$BASE_BRANCH"; then
-  echo "❌ Ошибка при создании worktree."
-  exit 1
+if [ "$BRANCH_EXISTS" = true ]; then
+  echo "   Режим: переподключение к существующей ветке"
+  if ! git worktree add "$TARGET_DIR" "$BRANCH_NAME"; then
+    echo "❌ Ошибка при создании worktree."
+    exit 1
+  fi
+else
+  echo "   База:  $BASE_BRANCH"
+  if ! git worktree add -b "$BRANCH_NAME" "$TARGET_DIR" "$BASE_BRANCH"; then
+    echo "❌ Ошибка при создании worktree."
+    exit 1
+  fi
 fi
 
 # Run wt-setup inside the new directory.

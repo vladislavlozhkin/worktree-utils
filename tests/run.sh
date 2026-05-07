@@ -142,11 +142,28 @@ run_test "wt new rejects invalid branch names" '
 '
 
 # ------------------------------------------------------------------------------
-run_test "wt new refuses existing branch" '
+run_test "wt new refuses branch already attached to a worktree" '
   "$WT" new feat/dup >/dev/null
   if "$WT" new feat/dup >/dev/null 2>&1; then
-    fail "duplicate branch name was accepted"
+    fail "duplicate branch name was accepted while worktree exists"
   fi
+'
+
+# ------------------------------------------------------------------------------
+run_test "wt new attaches to existing branch when no worktree uses it" '
+  git branch feat/orphan
+  "$WT" new feat/orphan >/dev/null
+  assert_file_exists "$MAIN_REPO/../feat-orphan/.git"
+  assert_eq "$(git -C "$MAIN_REPO/../feat-orphan" rev-parse --abbrev-ref HEAD)" "feat/orphan" "branch"
+'
+
+# ------------------------------------------------------------------------------
+run_test "wt new recovers when worktree folder was deleted manually" '
+  "$WT" new feat/lost >/dev/null
+  rm -rf "$MAIN_REPO/../feat-lost"   # nuke folder, leaving stale worktree metadata
+  "$WT" new feat/lost >/dev/null
+  assert_file_exists "$MAIN_REPO/../feat-lost/.git"
+  assert_eq "$(git -C "$MAIN_REPO/../feat-lost" rev-parse --abbrev-ref HEAD)" "feat/lost" "branch"
 '
 
 # ------------------------------------------------------------------------------
