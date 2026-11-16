@@ -108,9 +108,15 @@ SETUP_SCRIPT="$SCRIPT_DIR/wt-setup"
 if [ -x "$SETUP_SCRIPT" ]; then
   echo "🔗 Запускаем wt-setup..."
   (cd "$TARGET_DIR" && "$SETUP_SCRIPT")
+  SETUP_STATUS=$?
+  if [ "$SETUP_STATUS" -ne 0 ]; then
+    echo "❌ Setup завершился с ошибкой; worktree сохранён: $TARGET_DIR" >&2
+    exit "$SETUP_STATUS"
+  fi
 else
   echo "⚠️  Скрипт wt-setup не найден по пути: $SETUP_SCRIPT"
-  echo "   Окружение придётся настроить вручную."
+  echo "   Окружение придётся настроить вручную. Worktree сохранён: $TARGET_DIR"
+  exit 1
 fi
 
 echo ""

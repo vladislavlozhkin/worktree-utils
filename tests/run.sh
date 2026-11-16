@@ -335,6 +335,268 @@ run_test "wt works when invoked through a symlink (global install)" '
   echo "$out" | grep -q "feat/global" || fail "feat/global not in list"
 '
 
+# ------------------------------------------------------------------------------
+run_test "kill yes preserves dirty and untracked data without force" '
+  "$WT" new feat/safe >/dev/null
+  target="$TEST_DIR/feat-safe"
+  echo dirty > "$target/shared.txt"
+  echo local > "$target/untracked"
+  if "$WT" kill feat/safe --yes </dev/null >/dev/null 2>&1; then fail "dirty removal succeeded"; fi
+  assert_eq "$(cat "$target/shared.txt")" dirty
+  git -C "$target" restore shared.txt
+  if "$WT" kill feat/safe -y </dev/null >/dev/null 2>&1; then fail "untracked removal succeeded"; fi
+  assert_eq "$(cat "$target/untracked")" local
+  "$WT" kill feat/safe -y -f >/dev/null
+  [ ! -d "$target" ] || fail "explicit force did not remove worktree"
+'
+
+run_test "kill interactive confirmation does not authorize force" '
+  "$WT" new feat/dirty >/dev/null
+  echo dirty > "$TEST_DIR/feat-dirty/shared.txt"
+  if printf "y\ny\n" | "$WT" kill feat/dirty >/dev/null 2>&1; then fail "confirmation authorized force"; fi
+  assert_eq "$(cat "$TEST_DIR/feat-dirty/shared.txt")" dirty
+  printf "y\n" | "$WT" kill feat/dirty --force >/dev/null
+'
+
+run_test "kill reports removal and branch deletion errors" '
+  "$WT" new feat/locked >/dev/null
+  git worktree lock "$TEST_DIR/feat-locked"
+  if "$WT" kill feat/locked -y --force >/dev/null 2>&1; then fail "locked removal succeeded"; fi
+  git worktree unlock "$TEST_DIR/feat-locked"
+  mkdir "$TEST_DIR/bin"
+  real_git=$(command -v git)
+  printf "#!/bin/bash\nif [ \"\$1\" = branch ] && [ \"\$2\" = -D ]; then exit 42; fi\nexec \"%s\" \"\$@\"\n" "$real_git" > "$TEST_DIR/bin/git"
+  chmod +x "$TEST_DIR/bin/git"
+  if PATH="$TEST_DIR/bin:$PATH" "$WT" kill feat/locked -y -D >/dev/null 2>&1; then fail "branch deletion failure hidden"; fi
+  git show-ref --verify --quiet refs/heads/feat/locked
+'
+
+run_test "setup refuses main before touching files symlinks or RUN" '
+  echo source > source
+  ln -s source local-link
+  printf "LINK shared.txt\nCOPY local-link\nRUN touch marker\n" > .worktree-config
+  if "$WT" setup >/dev/null 2>&1; then fail "main setup succeeded"; fi
+  if (cd scripts && "$WT" setup) >/dev/null 2>&1; then fail "main subdirectory setup succeeded"; fi
+  [ ! -L shared.txt ] || fail "main regular file replaced"
+  assert_eq "$(cat shared.txt)" "shared content"
+  assert_eq "$(readlink local-link)" source
+  [ ! -e marker ] || fail "RUN executed in main"
+'
+
+run_test "setup normalizes subdirectory and isolates RUN cd and exit" '
+  git worktree add -b feat/root "$TEST_DIR/feat-root" >/dev/null
+  printf "RUN cd /\nRUN exit 0\nRUN pwd > root-marker\nLINK shared.txt\n" > .worktree-config
+  mkdir "$TEST_DIR/feat-root/subdir"
+  (cd "$TEST_DIR/feat-root/subdir" && "$WT" setup) >/dev/null
+  assert_eq "$(cat "$TEST_DIR/feat-root/root-marker")" "$(cd "$TEST_DIR/feat-root" && pwd -P)"
+  assert_symlink_to "$TEST_DIR/feat-root/shared.txt" "$MAIN_REPO/shared.txt"
+  [ ! -e "$TEST_DIR/feat-root/subdir/shared.txt" ] || fail "setup used subdirectory"
+'
+
+run_test "setup preserves ignored contents inside tracked directories" '
+  mkdir tracked
+  echo tracked > tracked/file
+  echo ignored > .gitignore
+  git add tracked .gitignore && git commit -q -m tracked
+  git worktree add -b feat/ignored "$TEST_DIR/feat-ignored" >/dev/null
+  echo precious > "$TEST_DIR/feat-ignored/tracked/ignored"
+  printf "LINK tracked\n" > .worktree-config
+  (cd "$TEST_DIR/feat-ignored" && "$WT" setup) >/dev/null
+  assert_eq "$(cat "$TEST_DIR/feat-ignored/tracked/ignored")" precious
+  [ ! -L "$TEST_DIR/feat-ignored/tracked" ] || fail "directory replaced"
+'
+
+run_test "setup preserves local symlinks and refuses symlink parents" '
+  git worktree add -b feat/symlinks "$TEST_DIR/feat-symlinks" >/dev/null
+  target="$TEST_DIR/feat-symlinks"
+  mkdir "$TEST_DIR/outside" nested
+  echo original > "$TEST_DIR/outside/file"
+  echo incoming > nested/file
+  ln -s "$TEST_DIR/outside" "$target/nested"
+  ln -s missing "$target/local-link"
+  echo source > local-link
+  printf "COPY local-link\nCOPY nested/file\nRUN touch later\n" > .worktree-config
+  if (cd "$target" && "$WT" setup) >/dev/null 2>&1; then fail "symlink parent accepted"; fi
+  assert_eq "$(readlink "$target/local-link")" missing
+  assert_eq "$(cat "$TEST_DIR/outside/file")" original
+  [ ! -e "$target/later" ] || fail "continued after failure"
+'
+
+run_test "COPY preserves source directory symlinks without dereferencing" '
+  git worktree add -b feat/copy-link "$TEST_DIR/feat-copy-link" >/dev/null
+  mkdir "$TEST_DIR/source-dir"
+  echo precious > "$TEST_DIR/source-dir/file"
+  ln -s "$TEST_DIR/source-dir" source-link
+  printf "COPY source-link\n" > .worktree-config
+  (cd "$TEST_DIR/feat-copy-link" && "$WT" setup) >/dev/null
+  assert_symlink_to "$TEST_DIR/feat-copy-link/source-link" "$TEST_DIR/source-dir"
+  assert_eq "$(cat "$TEST_DIR/source-dir/file")" precious
+'
+
+run_test "setup refuses escaping and metadata paths" '
+  git worktree add -b feat/paths "$TEST_DIR/feat-paths" >/dev/null
+  for path in ../escape "$MAIN_REPO/shared.txt" .git/config; do
+    printf "COPY %s\nRUN touch later\n" "$path" > .worktree-config
+    if (cd "$TEST_DIR/feat-paths" && "$WT" setup) >/dev/null 2>&1; then fail "unsafe path accepted: $path"; fi
+    [ ! -e "$TEST_DIR/feat-paths/later" ] || fail "continued after invalid path"
+  done
+'
+
+run_test "new propagates RUN failure and preserves worktree" '
+  printf "RUN exit 23\nRUN touch later\n" > .worktree-config
+  status=0
+  "$WT" new feat/failure >/dev/null 2>&1 || status=$?
+  assert_eq "$status" 23
+  assert_file_exists "$TEST_DIR/feat-failure/.git"
+  [ ! -e "$TEST_DIR/feat-failure/later" ] || fail "continued after RUN failure"
+  git show-ref --verify --quiet refs/heads/feat/failure
+'
+
+run_test "setup reports COPY LINK mkdir and rm failures and stops" '
+  git worktree add -b feat/io "$TEST_DIR/feat-io" >/dev/null
+  mkdir "$TEST_DIR/bin"
+  for op in cp ln mkdir rm; do
+    printf "#!/bin/bash\nexit 31\n" > "$TEST_DIR/bin/$op"
+    chmod +x "$TEST_DIR/bin/$op"
+    case "$op" in
+      cp) echo data > fresh; printf "COPY fresh\n" > .worktree-config ;;
+      ln) printf "LINK fresh\n" > .worktree-config ;;
+      mkdir) mkdir -p deep; echo data > deep/file; printf "COPY deep/file\n" > .worktree-config ;;
+      rm) printf "LINK shared.txt\n" > .worktree-config ;;
+    esac
+    echo "RUN touch later" >> .worktree-config
+    if (cd "$TEST_DIR/feat-io" && PATH="$TEST_DIR/bin:$PATH" "$WT" setup) >/dev/null 2>&1; then fail "$op failure hidden"; fi
+    [ ! -e "$TEST_DIR/feat-io/later" ] || fail "continued after $op failure"
+    /bin/rm "$TEST_DIR/bin/$op"
+  done
+'
+
+# Follow-up safety regressions: Git status is not a complete data-loss check.
+run_test "setup normalizes directory suffixes and exclude anchors" '
+  mkdir config-dir exclude-dir anchored
+  echo config > config-dir/file
+  echo exclude > exclude-dir/file
+  echo anchor > anchored/file
+  printf "LINK config-dir/\n" > .worktree-config
+  printf "exclude-dir/\n/anchored\ndist/\n" > .git/info/exclude
+  "$WT" new feat/normalized >/dev/null
+  target="$TEST_DIR/feat-normalized"
+  assert_symlink_to "$target/config-dir" "$MAIN_REPO/config-dir"
+  assert_symlink_to "$target/exclude-dir" "$MAIN_REPO/exclude-dir"
+  assert_symlink_to "$target/anchored" "$MAIN_REPO/anchored"
+  [ ! -e "$target/dist" ] || fail "missing source unexpectedly created"
+'
+
+run_test "setup skips unsafe exclude entries and overlapping children" '
+  mkdir .idea
+  echo original > .idea/ws.xml
+  printf ".idea\n.idea/ws.xml\n../unsafe\n//absolute\n!negation\n.git/config\nRUN touch-not-a-command\n" > .git/info/exclude
+  git worktree add -b feat/excludes "$TEST_DIR/feat-excludes" >/dev/null
+  (cd "$TEST_DIR/feat-excludes" && "$WT" setup) >/dev/null
+  assert_symlink_to "$TEST_DIR/feat-excludes/.idea" "$MAIN_REPO/.idea"
+  assert_eq "$(cat .idea/ws.xml)" original
+'
+
+run_test "setup preserves ignored data inside submodules" '
+  make_main_repo "$TEST_DIR/sub-source"
+  git -c protocol.file.allow=always submodule add "$TEST_DIR/sub-source" modules/sub >/dev/null 2>&1
+  git commit -q -am submodule
+  git worktree add -b feat/submodule "$TEST_DIR/feat-submodule" >/dev/null
+  target="$TEST_DIR/feat-submodule"
+  git -C "$target" -c protocol.file.allow=always submodule update --init >/dev/null 2>&1
+  (cd "$target/modules/sub" && echo secret >> "$(git rev-parse --git-path info/exclude)")
+  echo precious > "$target/modules/sub/secret"
+  assert_eq "$(git -C "$target" status --porcelain --ignored -- modules)" ""
+  for path in modules modules/sub; do
+    printf "LINK %s\n" "$path" > .worktree-config
+    (cd "$target" && "$WT" setup) >/dev/null
+    assert_eq "$(cat "$target/modules/sub/secret")" precious
+    [ ! -L "$target/$path" ] || fail "gitlink target replaced"
+  done
+'
+
+run_test "setup preserves ignored nested repository metadata" '
+  mkdir tracked
+  echo committed > tracked/file
+  echo nested > .gitignore
+  git add tracked .gitignore && git commit -q -m tracked
+  git worktree add -b feat/nested "$TEST_DIR/feat-nested" >/dev/null
+  target="$TEST_DIR/feat-nested"
+  make_main_repo "$target/tracked/nested"
+  echo precious > "$target/tracked/nested/secret"
+  printf "LINK tracked\n" > .worktree-config
+  (cd "$target" && "$WT" setup) >/dev/null
+  assert_eq "$(cat "$target/tracked/nested/secret")" precious
+  assert_file_exists "$target/tracked/nested/.git"
+'
+
+run_test "setup preserves nested bare repository data" '
+  mkdir tracked
+  echo committed > tracked/file
+  git add tracked && git commit -q -m tracked
+  git worktree add -b feat/bare-data "$TEST_DIR/feat-bare-data" >/dev/null
+  target="$TEST_DIR/feat-bare-data"
+  git init -q --bare "$target/tracked/bare.git"
+  echo precious > "$target/tracked/bare.git/secret"
+  printf "LINK tracked\n" > .worktree-config
+  (cd "$target" && "$WT" setup) >/dev/null
+  assert_eq "$(cat "$target/tracked/bare.git/secret")" precious
+  assert_file_exists "$target/tracked/bare.git/HEAD"
+'
+
+run_test "new reports missing or non executable setup and preserves worktree" '
+  for mode in missing non-executable; do
+    cp "$SCRIPTS_DIR/wt-setup" scripts/wt-setup
+    case "$mode" in
+      missing) rm scripts/wt-setup ;;
+      non-executable) chmod -x scripts/wt-setup ;;
+    esac
+    if "$MAIN_REPO/scripts/wt-new" "feat/$mode" >/dev/null 2>&1; then fail "$mode setup accepted"; fi
+    assert_file_exists "$TEST_DIR/feat-$mode/.git"
+    git show-ref --verify --quiet "refs/heads/feat/$mode"
+  done
+'
+
+run_test "setup preserves assume unchanged and skip worktree files and directories" '
+  mkdir tracked
+  echo committed > tracked/file
+  git add tracked && git commit -q -m tracked
+  git worktree add -b feat/flags "$TEST_DIR/feat-flags" >/dev/null
+  target="$TEST_DIR/feat-flags"
+  for flag in assume-unchanged skip-worktree; do
+    git -C "$target" update-index "--$flag" shared.txt tracked/file
+    echo precious > "$target/shared.txt"
+    echo precious > "$target/tracked/file"
+    assert_eq "$(git -C "$target" status --porcelain -- shared.txt tracked)" ""
+    printf "LINK shared.txt\nLINK tracked\n" > .worktree-config
+    (cd "$target" && "$WT" setup) >/dev/null
+    assert_eq "$(cat "$target/shared.txt")" precious
+    assert_eq "$(cat "$target/tracked/file")" precious
+    git -C "$target" update-index "--no-$flag" shared.txt tracked/file
+    git -C "$target" restore shared.txt tracked/file
+  done
+'
+
+run_test "setup treats pathspec magic filenames literally" '
+  magic=":(literal)shared.txt"
+  echo committed > "$magic"
+  git --literal-pathspecs add -- "$magic" && git commit -q -m literal
+  git worktree add -b feat/literal "$TEST_DIR/feat-literal" >/dev/null
+  target="$TEST_DIR/feat-literal"
+  echo precious > "$target/$magic"
+  printf "LINK %s\n" "$magic" > .worktree-config
+  (cd "$target" && "$WT" setup) >/dev/null
+  assert_eq "$(cat "$target/$magic")" precious
+  [ ! -L "$target/$magic" ] || fail "dirty literal path replaced"
+'
+
+run_test "kill detached worktree with delete branch exits successfully" '
+  target="$TEST_DIR/detached"
+  git worktree add --detach "$target" >/dev/null
+  "$WT" kill detached -y -D >/dev/null
+  [ ! -d "$target" ] || fail "detached worktree remains"
+'
+
 echo
 echo "================================================="
 echo "Passed: $PASS  Failed: $FAIL"

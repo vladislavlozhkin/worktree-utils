@@ -26,9 +26,19 @@ if [ -z "$MAIN_WORKTREE" ]; then
   exit 1
 fi
 
+# Resolve physical roots before parsing config or performing any operations.
+WORKTREE_ROOT=$(git rev-parse --show-toplevel) || exit 1
+WORKTREE_ROOT=$(cd "$WORKTREE_ROOT" && pwd -P) || exit 1
+MAIN_WORKTREE=$(cd "$MAIN_WORKTREE" && pwd -P) || exit 1
+if [ "$WORKTREE_ROOT" = "$MAIN_WORKTREE" ]; then
+  echo "❌ wt setup разрешён только в linked worktree, не в main." >&2
+  exit 1
+fi
+cd "$WORKTREE_ROOT" || exit 1
+
 echo "🔍 Main Worktree: $MAIN_WORKTREE"
 
-GIT_COMMON_DIR=$(git rev-parse --git-common-dir)
+GIT_COMMON_DIR=$(git rev-parse --git-common-dir) || exit 1
 EXCLUDE_FILE="$GIT_COMMON_DIR/info/exclude"
 CONFIG_FILE="$MAIN_WORKTREE/.worktree-config"
 
@@ -44,6 +54,27 @@ add_task() {
   local action="$1" source="$2" arg="$3"
 
   if [ "$action" != "RUN" ]; then
+    # Normalize directory suffixes for both sources, and Git's root anchor
+    # only for exclude entries. Deduplicate normalized paths (first wins).
+    [ "$source" = "exclude" ] && arg="${arg#/}"
+    while [[ "$arg" == */ ]]; do arg="${arg%/}"; done
+    while [[ "$arg" == ./* ]]; do arg="${arg#./}"; done
+    case "/$arg/" in
+      *'//'*|*'/../'*|*'/./'*|*'/.git/'*)
+        if [ "$source" = "exclude" ]; then
+          echo "⚠️  Пропущено exclude: $arg (небезопасный или неподдерживаемый путь)" >&2
+          return 0
+        fi
+        echo "❌ Небезопасный путь: $arg" >&2
+        exit 1 ;;
+    esac
+    if [ "$source" = "exclude" ]; then
+      case "$arg" in
+        '!'*|*\\*)
+          echo "⚠️  Пропущено exclude: $arg (неподдерживаемый паттерн)" >&2
+          return 0 ;;
+      esac
+    fi
     local seen
     for seen in "${SEEN_PATHS[@]}"; do
       [ "$seen" = "$arg" ] && return 0
@@ -69,7 +100,8 @@ parse_config_file() {
     [[ "$raw" == \#* ]] && continue
 
     if [[ "$raw" =~ ^([A-Za-z]+)[[:space:]]+(.+)$ ]]; then
-      verb="${BASH_REMATCH[1]^^}"
+      # Bash 3.2 (macOS) has no ${value^^} expansion.
+      verb=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
       rest="${BASH_REMATCH[2]}"
       case "$verb" in
         LINK|COPY|RUN) add_task "$verb" "config" "$rest" ;;
@@ -111,7 +143,13 @@ for TASK in "${TASKS[@]}"; do
 
   if [ "$ACTION" = "RUN" ]; then
     echo "🚀 RUN: $ITEM"
-    eval "$ITEM"
+    # Each RUN starts at the root; cd/exit cannot change the setup process.
+    (eval "$ITEM")
+    RUN_STATUS=$?
+    if [ "$RUN_STATUS" -ne 0 ]; then
+      echo "❌ RUN завершился с ошибкой ($RUN_STATUS): $ITEM" >&2
+      exit "$RUN_STATUS"
+    fi
     continue
   fi
 
@@ -123,39 +161,79 @@ for TASK in "${TASKS[@]}"; do
   SRC="$MAIN_WORKTREE/$ITEM"
   TGT="./$ITEM"
 
+  # Never traverse a destination directory symlink (including dangling ones).
+  PARENT=$(dirname "$TGT") || exit 1
+  SKIP_ITEM=false
+  while [ "$PARENT" != "." ]; do
+    if [ -L "./$PARENT" ]; then
+      if [ "$TASK_SOURCE" = "exclude" ]; then
+        echo "⚠️  Пропущено exclude: $ITEM (родитель — симлинк: $PARENT)" >&2
+        SKIP_ITEM=true
+        break
+      fi
+      echo "❌ Родитель пути — симлинк: $PARENT" >&2
+      exit 1
+    fi
+    PARENT=$(dirname "$PARENT") || exit 1
+  done
+  [ "$SKIP_ITEM" = true ] && continue
+
   if [ ! -e "$SRC" ] && [ ! -L "$SRC" ]; then
     continue
   fi
 
   if [ -e "$TGT" ] || [ -L "$TGT" ]; then
-    if [ -L "$TGT" ]; then
-      # Existing symlink — safe to replace under any verb.
-      rm "$TGT"
-    elif [ "$TASK_SOURCE" = "config" ] \
-         && git ls-files --error-unmatch -- "$ITEM" >/dev/null 2>&1 \
-         && [ -z "$(git status --porcelain -- "$ITEM" 2>/dev/null)" ]; then
-      # Tracked & clean file that the user explicitly listed in config.
-      # Safe to replace — the contents live in git.
-      rm -rf "$TGT"
+    STATUS=$(git --literal-pathspecs status --porcelain --untracked-files=all --ignored -- "$ITEM") || exit 1
+    # Status can hide edits under index flags, and does not inventory data in
+    # submodules. Refuse replacement whenever either limitation applies.
+    INDEX_FLAGS=$(git --literal-pathspecs ls-files -v -- "$ITEM") || exit 1
+    INDEX_STAGES=$(git --literal-pathspecs ls-files --stage -- "$ITEM") || exit 1
+    PROTECTED=false
+    while IFS= read -r ENTRY; do
+      case "$ENTRY" in [a-zS]' '*) PROTECTED=true ;; esac
+    done <<< "$INDEX_FLAGS"
+    while IFS= read -r ENTRY; do
+      case "$ENTRY" in '160000 '*) PROTECTED=true ;; esac
+    done <<< "$INDEX_STAGES"
+    if [ "$PROTECTED" = false ] && [ -d "$TGT" ] && [ ! -L "$TGT" ]; then
+      # Nested .git files/dirs may themselves be ignored or untracked.
+      # Also recognize bare repositories by HEAD + objects. find does not
+      # follow directory symlinks, and need not inventory .git contents.
+      NESTED_GIT=$(find "$TGT" -name .git -prune -print -o -name HEAD -type f -print) || exit 1
+      while IFS= read -r METADATA; do
+        case "$METADATA" in
+          */.git) PROTECTED=true ;;
+          */HEAD) [ -d "${METADATA%/*}/objects" ] && PROTECTED=true ;;
+        esac
+      done <<< "$NESTED_GIT"
+    fi
+    if [ ! -L "$TGT" ] && [ "$TASK_SOURCE" = "config" ] \
+         && [ "$PROTECTED" = false ] \
+         && git --literal-pathspecs ls-files --error-unmatch -- "$ITEM" >/dev/null 2>&1 \
+         && [ -z "$STATUS" ]; then
+      # Include ignored contents: ordinary git status hides local data inside
+      # tracked directories. Existing symlinks are always preserved.
+      rm -r -- "$TGT" || exit 1
     else
-      echo "⚠️  Пропущено: $ITEM (существует локальный файл, не перезаписываю)"
+      echo "⚠️  Пропущено: $ITEM (существующий или защищённый путь, не перезаписываю)"
       continue
     fi
   fi
 
   TGT_PARENT=$(dirname "$TGT")
   if [ ! -d "$TGT_PARENT" ]; then
-    mkdir -p "$TGT_PARENT"
+    mkdir -p "$TGT_PARENT" || exit 1
   fi
 
   if [ "$ACTION" = "COPY" ]; then
-    cp -R "$SRC" "$TGT"
+    cp -RP "$SRC" "$TGT" || exit 1
     echo "📋 COPY: $ITEM"
   elif [ "$ACTION" = "LINK" ]; then
-    ln -sfn "$SRC" "$TGT"
+    ln -s "$SRC" "$TGT" || exit 1
     echo "🔗 LINK: $ITEM"
   else
-    echo "❓ Неизвестное действие: $ACTION для $ITEM"
+    echo "❓ Неизвестное действие: $ACTION для $ITEM" >&2
+    exit 1
   fi
 done
 

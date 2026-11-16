@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # wt-kill: Remove a worktree (and optionally its branch).
-# Usage: wt-kill <path-fragment-or-branch> [-D|--delete-branch] [-y|--yes]
+# Usage: wt-kill <path-fragment-or-branch> [-D|--delete-branch] [-y|--yes] [-f|--force]
 # ==============================================================================
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,13 +12,15 @@ SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUERY=""
 DELETE_BRANCH=false
 ASSUME_YES=false
+FORCE=false
 
 for arg in "$@"; do
   case "$arg" in
     -D|--delete-branch) DELETE_BRANCH=true ;;
     -y|--yes)           ASSUME_YES=true ;;
+    -f|--force)         FORCE=true ;;
     -h|--help)
-      echo "Usage: wt-kill <path-or-branch> [-D|--delete-branch] [-y|--yes]"
+      echo "Usage: wt-kill <path-or-branch> [-D|--delete-branch] [-y|--yes] [-f|--force]"
       exit 0 ;;
     *)
       [ -z "$QUERY" ] && QUERY="$arg"
@@ -27,9 +29,10 @@ for arg in "$@"; do
 done
 
 if [ -z "$QUERY" ]; then
-  echo "Использование: wt-kill <путь-или-ветка> [-D|--delete-branch] [-y|--yes]"
+  echo "Использование: wt-kill <путь-или-ветка> [-D|--delete-branch] [-y|--yes] [-f|--force]"
   echo "   -D, --delete-branch: Удалить также связанную git-ветку"
-  echo "   -y, --yes:           Не запрашивать подтверждение"
+  echo "   -y, --yes:           Не запрашивать подтверждение (не разрешает force)"
+  echo "   -f, --force:         Разрешить потерю локальных изменений"
   exit 1
 fi
 
@@ -88,36 +91,26 @@ if [ "$ASSUME_YES" != true ]; then
   [[ ! "$REPLY" =~ ^[Yy]$ ]] && { echo "Отмена."; exit 0; }
 fi
 
-# Try a non-forced removal first; only escalate if it actually fails.
-if git worktree remove "$WT_PATH" 2>/tmp/wt-kill-err.$$; then
+# Force is authorized only by an explicit flag, never by --yes or a fallback.
+REMOVE_ARGS=()
+[ "$FORCE" = true ] && REMOVE_ARGS+=(--force)
+if git worktree remove "${REMOVE_ARGS[@]}" "$WT_PATH"; then
   echo "✅ Папка удалена."
 else
-  err=$(cat /tmp/wt-kill-err.$$)
-  rm -f /tmp/wt-kill-err.$$
-  echo "⚠️  git worktree remove отказался удалять $WT_PATH:"
-  printf '     %s\n' "${err//$'\n'/$'\n     '}"
-
-  if [ "$ASSUME_YES" != true ]; then
-    read -r -p "Удалить принудительно (--force)? Несохранённые изменения будут потеряны. (y/N) " -n 1 FORCE_REPLY
-    echo ""
-    [[ ! "$FORCE_REPLY" =~ ^[Yy]$ ]] && { echo "Отмена."; exit 1; }
-  fi
-
-  if git worktree remove --force "$WT_PATH"; then
-    echo "✅ Папка удалена (force)."
-  else
-    echo "❌ Не удалось удалить worktree даже с --force."
-    exit 1
-  fi
+  echo "❌ Не удалось удалить worktree (для принудительного удаления используйте --force)." >&2
+  exit 1
 fi
-rm -f /tmp/wt-kill-err.$$
 
 if [ "$DELETE_BRANCH" = true ] && [ -n "$WT_BRANCH" ] && [ "$WT_BRANCH" != "(detached)" ]; then
   if git branch -D "$WT_BRANCH"; then
     echo "✅ Ветка '$WT_BRANCH' удалена."
   else
-    echo "⚠️  Не удалось удалить ветку '$WT_BRANCH'."
+    echo "⚠️  Не удалось удалить ветку '$WT_BRANCH'." >&2
+    exit 1
   fi
 else
   [ "$DELETE_BRANCH" != true ] && echo "ℹ️  Ветка '$WT_BRANCH' сохранена (используйте -D для удаления)."
 fi
+
+# A detached worktree has no branch to delete; removal still succeeded.
+exit 0
